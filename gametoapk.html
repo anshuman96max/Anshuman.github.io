@@ -1,0 +1,363 @@
+ 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DashBeat Mobile</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: 'Segoe UI', sans-serif;
+      background: #111;
+    }
+    #startScreen, #gameContainer {
+      position: absolute;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 10;
+    }
+    #startScreen {
+      background: rgba(0, 0, 0, 0.85);
+      color: white;
+      text-align: center;
+    }
+    #ui {
+      position: absolute;
+      bottom: 10px;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      z-index: 11;
+    }
+    canvas {
+      display: block;
+      margin: 0 auto;
+    }
+    button, select, input[type="file"] {
+      padding: 10px 15px;
+      font-size: 16px;
+      border-radius: 8px;
+      border: none;
+      background: #ffffffcc;
+      color: #111;
+    }
+    button:hover {
+      background: #ffffffee;
+    }
+    h1 {
+      font-size: 2em;
+      margin-bottom: 10px;
+    }
+    #scoreDisplay, #highScoreDisplay {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-size: 18px;
+      background: rgba(0,0,0,0.5);
+      padding: 6px 12px;
+      border-radius: 8px;
+      z-index: 12;
+    }
+    #highScoreDisplay {
+      top: 40px;
+    }
+  </style>
+</head>
+<body>
+  <div id="startScreen">
+    <h1>DashBeat</h1>
+    <p>Upload your song and jump with the beat!</p>
+    <button onclick="startGameUI()">Play Game</button>
+  </div>
+  <div id="gameContainer" style="display:none;">
+    <canvas id="gameCanvas"></canvas>
+    <div id="ui">
+      <input type="file" id="musicUpload" accept="audio/*"/>
+      <button id="generateLevel">Generate</button>
+      <select id="savedLevels"></select>
+      <button id="playLevel">Play</button>
+      <button id="speedBtn">Speed: Normal</button>
+      <button id="restartBtn">Restart</button>
+    </div>
+    <div id="scoreDisplay">Score: 0</div>
+    <div id="highScoreDisplay">High Score: 0</div>
+  </div>
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const W = canvas.width;
+    const H = canvas.height;
+
+    let player = { x: 80, y: H - 100, vy: 0, grounded: false, angle: 0 };
+    let gravity = 0.8;
+    let spikes = [];
+    let particles = [];
+    let gameStarted = false;
+    let music = new Audio();
+    let speedUp = false;
+    let score = 0;
+    let highScore = localStorage.getItem("highScore") || 0;
+    let powerups = [];
+    let backgroundHue = 200;
+    let lastChunkTime = 0; // Track last chunk spawn time
+
+    let chunks = [
+      [300], // Single spike
+      [250, 550], // Two spikes, wider gap
+      [200, 600], // Two spikes, even wider
+      [150, 450], // Two spikes, moderate gap
+    ];
+    let currentLevelChunks = [];
+    let currentLevelIndex = 0;
+    let savedLevels = JSON.parse(localStorage.getItem("savedLevels") || "[]");
+
+    function drawPlayer() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(player.angle);
+      ctx.fillStyle = "#00faff";
+      ctx.shadowColor = "#00faff";
+      ctx.shadowBlur = 20;
+      ctx.fillRect(-20, -20, 40, 40);
+      ctx.restore();
+    }
+
+    function drawSpikes() {
+      ctx.fillStyle = "#ff3c38";
+      ctx.shadowColor = "#ff3c38";
+      ctx.shadowBlur = 10;
+      spikes.forEach(spike => {
+        ctx.beginPath();
+        ctx.moveTo(spike.x, H - 40);
+        ctx.lineTo(spike.x + spike.width / 2, H - 80);
+        ctx.lineTo(spike.x + spike.width, H - 40);
+        ctx.closePath();
+        ctx.fill();
+      });
+    }
+
+    function drawParticles() {
+      particles.forEach(p => {
+        ctx.fillStyle = `rgba(255,255,255,${p.a})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        p.x += p.vx;
+        p.y += p.vy;
+        p.a -= 0.02;
+      });
+      particles = particles.filter(p => p.a > 0);
+    }
+
+    function drawBackground() {
+      backgroundHue = (backgroundHue + 0.5) % 360;
+      ctx.fillStyle = `hsl(${backgroundHue}, 60%, 15%)`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    function update() {
+      if (!gameStarted) return;
+
+      ctx.clearRect(0, 0, W, H);
+      drawBackground();
+
+      player.vy += gravity;
+      player.y += player.vy;
+      player.angle += 0.05; // Consistent rotation update
+
+      if (player.y > H - 60) {
+        player.y = H - 60;
+        player.vy = 0;
+        player.grounded = true;
+      } else player.grounded = false;
+
+      drawPlayer();
+      drawSpikes();
+      drawParticles();
+
+      spikes.forEach(spike => spike.x -= 6);
+      spikes = spikes.filter(spike => spike.x + spike.width > 0);
+
+      // Spawn chunks less frequently and with control
+      const currentTime = performance.now();
+      if (currentTime - lastChunkTime > 2000 && spikes.length < 5) { // 2-second cooldown, max 5 spikes
+        spawnChunk();
+        lastChunkTime = currentTime;
+      }
+
+      spikes.forEach(spike => {
+        if (
+          player.x + 20 > spike.x &&
+          player.x - 20 < spike.x + spike.width &&
+          player.y + 20 > H - 80
+        ) resetGame(true);
+      });
+
+      if (Math.random() < 0.005) spawnPowerup();
+
+      powerups.forEach(p => {
+        p.x -= 6;
+        ctx.fillStyle = "gold";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (Math.abs(player.x - p.x) < 30 && Math.abs(player.y - p.y) < 30) {
+          score += 200;
+          for (let i = 0; i < 10; i++) {
+            particles.push({ x: p.x, y: p.y, vx: Math.random()*4-2, vy: Math.random()*4-2, r: 4, a: 1 });
+          }
+          p.collected = true;
+        }
+      });
+
+      powerups = powerups.filter(p => !p.collected && p.x > -20);
+
+      score += 1;
+      document.getElementById("scoreDisplay").textContent = "Score: " + score;
+      document.getElementById("highScoreDisplay").textContent = "High Score: " + highScore;
+
+      requestAnimationFrame(update);
+    }
+
+    function spawnChunk() {
+      let pattern;
+      if (currentLevelChunks.length > 0 && currentLevelIndex < currentLevelChunks.length) {
+        pattern = chunks[currentLevelChunks[currentLevelIndex++] % chunks.length];
+      } else {
+        // Prefer easier patterns for random spawns
+        pattern = chunks[Math.floor(Math.random() * 2)]; // Only use first two chunks
+      }
+      pattern.forEach(offset => {
+        // Only spawn if no spike is too close
+        const lastSpike = spikes[spikes.length - 1];
+        if (!lastSpike || lastSpike.x + lastSpike.width < W + offset - 200) {
+          spikes.push({ x: W + offset, width: 30 });
+        }
+      });
+    }
+
+    function spawnPowerup() {
+      powerups.push({ x: W + 100, y: H - 100, collected: false });
+    }
+
+    function resetGame(isGameOver = false) {
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem("highScore", highScore);
+      }
+      player = { x: 80, y: H - 100, vy: 0, grounded: false, angle: 0 };
+      spikes = [];
+      powerups = [];
+      particles = [];
+      currentLevelIndex = 0;
+      score = 0;
+      lastChunkTime = 0; // Reset chunk timer
+      if (isGameOver) {
+        music.pause();
+        gameStarted = false;
+        document.getElementById("ui").style.display = "flex"; // Show UI on game over
+        alert("Game Over! Your Score: " + score);
+      }
+    }
+
+    window.addEventListener("keydown", e => {
+      if ((e.code === "Space" || e.code === "ArrowUp") && player.grounded) player.vy = -16;
+    });
+
+    canvas.addEventListener("touchstart", () => {
+      if (player.grounded) player.vy = -16;
+    });
+
+    document.getElementById("musicUpload").addEventListener("change", e => {
+      const file = e.target.files[0];
+      if (file) {
+        const url = URL.createObjectURL(file);
+        music = new Audio(url);
+        music.oncanplaythrough = () => {
+          resetGame();
+          gameStarted = true;
+          document.getElementById("ui").style.display = "none"; // Hide UI when game starts
+          music.playbackRate = speedUp ? 1.5 : 1;
+          music.play().catch(e => console.log("Playback failed:", e));
+          update();
+        };
+      }
+    });
+
+    document.getElementById("speedBtn").addEventListener("click", () => {
+      speedUp = !speedUp;
+      document.getElementById("speedBtn").textContent = speedUp ? "Speed: Fast" : "Speed: Normal";
+      music.playbackRate = speedUp ? 1.5 : 1;
+    });
+
+    document.getElementById("restartBtn").addEventListener("click", () => {
+      resetGame(); // Reset game state without pausing music
+      gameStarted = true;
+      document.getElementById("ui").style.display = "none"; // Hide UI on restart
+      if (music.src) {
+        music.currentTime = 0;
+        music.playbackRate = speedUp ? 1.5 : 1;
+        music.play().catch(e => console.log("Playback failed:", e));
+      }
+      update();
+    });
+
+    document.getElementById("generateLevel").addEventListener("click", () => {
+      const level = Array.from({ length: 20 }, () => Math.floor(Math.random() * chunks.length));
+      savedLevels.push(level);
+      localStorage.setItem("savedLevels", JSON.stringify(savedLevels));
+      loadSavedLevelsToDropdown();
+      alert("New level generated!");
+    });
+
+    document.getElementById("playLevel").addEventListener("click", () => {
+      const index = parseInt(document.getElementById("savedLevels").value);
+      if (!isNaN(index)) {
+        currentLevelChunks = savedLevels[index];
+        currentLevelIndex = 0;
+        resetGame();
+        if (music.src) {
+          gameStarted = true;
+          document.getElementById("ui").style.display = "none"; // Hide UI when playing a level
+          music.currentTime = 0;
+          music.playbackRate = speedUp ? 1.5 : 1;
+          music.play().catch(e => console.log("Playback failed:", e));
+          update();
+        }
+      }
+    });
+
+    function loadSavedLevelsToDropdown() {
+      const select = document.getElementById("savedLevels");
+      select.innerHTML = "";
+      savedLevels.forEach((lvl, i) => {
+        const opt = document.createElement("option");
+        opt.value = i;
+        opt.textContent = "Level " + (i + 1);
+        select.appendChild(opt);
+      });
+    }
+
+    function startGameUI() {
+      document.getElementById("startScreen").style.display = "none";
+      document.getElementById("gameContainer").style.display = "flex";
+      loadSavedLevelsToDropdown();
+      document.getElementById("highScoreDisplay").textContent = "High Score: " + highScore;
+    }
+  </script>
+</body>
+</html>
